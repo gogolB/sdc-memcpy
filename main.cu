@@ -1,29 +1,174 @@
 #include <iostream>
-#include <cuda_runtime.h>
+#include <time.h>
+#include <map>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <sstream>
+#include <iterator>
+#include <iostream>
 #include "include/cxxopts.hpp"
+#include <cuda_runtime.h>
 
 
 #define SDC_MEMCPY_VERSION "v0.1.0"
 
-auto parse_args(auto& result) -> int
+
+// Device code
+__global__ void MemXOR(int* src, int* dest, unsigned long long size)
 {
-    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size)
+    {
+        dest[idx] = src[idx] ^ 0xFFFFFFFF;
+    }
+}
+
+auto get_gpus(cxxopts::ParseResult& result) -> std::vector<int>
+{
+    auto& gpus = result["gpus"].as<std::vector<std::string>>();
+
+    std::vector<int> gpu_ids;
+
+    int gpus_count;
+    cudaError_t error = cudaGetDeviceCount(&gpus_count);
+
+    if (error != cudaSuccess) {
+        std::cerr << "Error: " << cudaGetErrorString(error) << std::endl;
+        return gpu_ids;
+    }
+
+    if (gpus[0] == "all")
+    {
+        for (int i = 0; i < gpus_count; i++)
+        {
+            gpu_ids.push_back(i);
+        }
+        return gpu_ids;
+    }
+
+    for (auto& gpu : gpus)
+    {
+        if (gpu == "all")
+        {
+            continue;
+        }
+        else
+        {
+            int gpu_id = std::stoi(gpu);
+            if (gpu_id >= gpus_count)
+            {
+                std::cerr << "Error: GPU " << gpu_id << " does not exist" << std::endl;
+                continue;
+            }
+            gpu_ids.push_back(gpu_id);
+        }
+    }
+
+    return gpu_ids;
+}
+
+auto get_duration(cxxopts::ParseResult& result) -> unsigned long long
+{
+    auto s_duration = result["duration"].as<std::string>();
+    auto unit = s_duration[s_duration.size() - 1];
+    auto time = 100;
+    if (s_duration.find(unit) != std::string::npos)
+    {
+        time = std::stoi(s_duration.substr(0, s_duration.size() - 1));
+    }
+    auto time_multiplier = 1;
+    switch (unit)
+    {
+    case 's':
+    case 'S':
+        time_multiplier = 1;
+        break;
+    case 'm':
+    case 'M':
+        time_multiplier = 60;
+        break;
+    case 'h':
+    case 'H':
+        time_multiplier = 60 * 60;
+        break;
+    case 'd':
+    case 'D':
+        time_multiplier = 60 * 60 * 24;
+        break;
+    default:
+        break;
+    }
+    unsigned long long duration = time * time_multiplier;
+    return duration;
+}
+
+auto get_size(cxxopts::ParseResult& result) -> unsigned long long
+{
+    auto s_size = result["size"].as<std::string>();
+    auto unit = s_size[s_size.size() - 1];
+    if (s_size.find(unit) != std::string::npos)
+    {
+        auto size = std::stoi(s_size.substr(0, s_size.size() - 1));
+    }
+    auto size_multiplier = 1;
+    switch (unit)
+    {
+        case 'b':
+        case 'B':
+            size_multiplier = 1;
+            break;
+        case 'k':
+        case 'K':
+            size_multiplier = 1024;
+            break;
+        case 'm':
+        case 'M':
+            size_multiplier = 1024 * 1024;
+            break;
+        case 'g':
+        case 'G':
+            size_multiplier = 1024 * 1024 * 1024;
+            break;
+        default:
+            break;
+    }
+    unsigned long long size = std::stoi(s_size) * size_multiplier;
+    return size;
+}
+
+auto parse_args(cxxopts::ParseResult&result) -> int
+{
+    auto gpus = result["gpus"].as<std::vector<std::string>>();
+    if (gpus.size() == 0)
+    {
+        std::cerr << "No GPUs specified" << std::endl;
+        return 1;
+    }
+    for (auto& gpu : gpus)
+    {
+        if (gpu == "all")
+        {
+            gpu = "0";
+        }
+    }
+
     return 0;
 }
 
-auto print_help(auto& result, auto& options) -> int
+auto print_help(cxxopts::ParseResult& result, auto& options) -> int
 {
     std::cout << options.help() << std::endl;
     return 0;
 }
 
-auto print_version(auto& result, auto& options) -> int
+auto print_version(cxxopts::ParseResult& result, auto& options) -> int
 {
     std::cout << SDC_MEMCPY_VERSION << std::endl;
     return 0;
 }
 
-auto list_gpus(auto& result, auto& options) -> int
+auto list_gpus(cxxopts::ParseResult& result, auto& options) -> int
 {
     std::cout << "List of GPUs" << std::endl;
     int deviceCount;
@@ -73,6 +218,150 @@ auto list_gpus(auto& result, auto& options) -> int
     return 0;
 }
 
+
+void load_alternating(void* a, void* b, size_t size)
+{
+    char* a_ptr = (char*)a;
+    for (size_t i = 0; i < size; i++) {
+        a_ptr[i] = 0b10101010;
+    }
+}
+
+bool validate_alternating(void* a, void* b, size_t size)
+{
+    char* a_ptr = (char*)a;
+    char* b_ptr = (char*)b;
+    for (size_t i = 0; i < size; i++) {
+        if (a_ptr[i] & b_ptr[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto load_pattern_map() -> std::map<std::string, std::function<void(void*, void*, size_t)>>
+{
+    std::map<std::string, std::function<void(void*, void*, size_t)>> patterns;
+    patterns["alternating"] = load_alternating;
+    return patterns;
+}
+
+auto load_validate_map() -> std::map<std::string, std::function<bool(void*, void*, size_t)>>
+{
+    std::map<std::string, std::function<bool(void*, void*, size_t)>> patterns;
+    patterns["alternating"] = validate_alternating;
+    return patterns;
+}
+
+auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
+{
+    // Load functions.
+    auto pattern_map = load_pattern_map();
+    auto validate_map = load_validate_map();
+
+    std::cout << "Running memcpy" << std::endl;
+    
+    auto gpu_ids = get_gpus(result);
+    std::string gpu_ids_str = "";
+    for (auto gpu_id : gpu_ids) {
+        gpu_ids_str += std::to_string(gpu_id) + ",";
+    }
+    std::cout << "  GPUs: " << gpu_ids_str << std::endl;
+    std::cout << "  Size: " << result["size"].as<std::string>() << std::endl;
+    std::cout << "  Duration: " << result["duration"].as<std::string>() << std::endl;
+    //std::cout << "  Pattern: " << vector_to_string(result["pattern"].as<std::vector<std::string>>()) << std::endl;
+    std::cout << "  Repeat: " << result["repeat"].as<int>() << std::endl;
+    std::cout << "  Block Size: " << result["block-size"].as<std::string>() << std::endl;
+    std::cout << "  Chunk Size: " << result["chunk-size"].as<std::string>() << std::endl;
+    std::cout << "  Non Blocking: " << result["non-blocking"].as<bool>() << std::endl;
+    std::cout << "  Zero Buffer: " << result["zero-buffer"].as<bool>() << std::endl;
+    std::cout << "  Use Pinned: " << result["use-pinned"].as<bool>() << std::endl;
+    std::cout << "  Use Unified: " << result["use-unified"].as<bool>() << std::endl;
+    
+    std::cout << "Allocating Host Memory" << std::endl;
+    auto size = get_size(result);
+    void* h_a;
+    void* h_b;
+
+    bool pinned = result["use-pinned"].as<bool>();
+    if (result["use-pinned"].as<bool>())
+    {
+        std::cout << "Allocating Pinned Memory" << std::endl;
+        cudaMallocHost(&h_a, size);
+        cudaMallocHost(&h_b, size);
+    }
+    else
+    {
+        cudaHostAlloc(&h_a, size, cudaHostAllocDefault);
+        cudaHostAlloc(&h_b, size, cudaHostAllocDefault);
+    }
+
+    std::cout << "Allocating Device Memory" << std::endl;
+    void* d_a;
+    void* d_b;
+    if (result["use-unified"].as<bool>())
+    {
+        std::cout << "Allocating Unified Memory" << std::endl;
+        cudaMallocManaged(&d_a, size);
+        cudaMallocManaged(&d_b, size);  
+    }
+    else
+    {
+        cudaMalloc(&d_a, size);
+        cudaMalloc(&d_b, size);
+    }
+
+    if (result["zero-buffer"].as<bool>())
+    {
+        std::cout << "Zeroing Device Memory" << std::endl;
+        cudaMemset(d_a, 0, size);
+        cudaMemset(d_b, 0, size);
+        memset(h_a, 0, size);
+        memset(h_b, 0, size);
+    }
+
+    auto duration = get_duration(result);
+
+    for (int i = 0; i < result["repeat"].as<int>(); i++)
+    {
+        std::cout << "Running Repeat: " << i << std::endl;
+        for (auto pattern : result["pattern"].as<std::vector<std::string>>())
+        {
+            std::cout << "Running Pattern: " << pattern << std::endl;
+            auto pattern_func = pattern_map[pattern];
+            auto validate_func = validate_map[pattern];
+            pattern_func(h_a, h_b, size);
+            auto start = time(NULL);
+            while (time(NULL) - start < start + duration)
+            {
+                if(result["zero-buffer"].as<bool>())
+                {
+                    cudaMemset(d_a, 0, size);
+                    cudaMemset(d_b, 0, size);
+                    memset(h_b, 0, size);
+                }
+                cudaMemcpy(d_a, h_a, size, cudaMemcpyHostToDevice);
+                MemXOR<<<1024, 1>>>((int *)d_a, (int *)d_b, size / 4);
+                cudaMemcpy(h_b, d_b, size, cudaMemcpyDeviceToHost);
+                cudaDeviceSynchronize();
+                if (!validate_func(h_a, h_b, size))
+                {
+                    std::cout << " [!] Found corruption" << std::endl;
+                }
+            }
+        }
+    }
+
+
+    std::cout << "Freeing Memory" << std::endl;
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFreeHost(h_a);
+    cudaFreeHost(h_b);
+
+    return 0;
+}
+
 auto run(auto& result, auto& options) -> int
 {
 
@@ -91,6 +380,8 @@ auto run(auto& result, auto& options) -> int
         return list_gpus(result, options);
     }
 
+    return run_memcpy(result, options);
+
     return 0;
 }
 
@@ -104,10 +395,10 @@ auto main(int argc, char** argv) -> int
         ("v,version", "Print version")
         ("g,gpus", "List of GPUs to run the test on", cxxopts::value<std::vector<std::string>>()->default_value("all"))
         ("l,list-gpus", "List all available GPUs")
-        ("s,size", "Size of the buffer to copy", cxxopts::value<std::string>()->default_value("1MB"))
+        ("s,size", "Size of the buffer to copy", cxxopts::value<std::string>()->default_value("1M"))
         ("d,duration", "Duration of the test", cxxopts::value<std::string>()->default_value("100s"))
         ("p,pattern", "Patterns to use for the copy", cxxopts::value<std::vector<std::string>>()->default_value("alternating"))
-        ("r,repeat", "Number of times to repeat the test", cxxopts::value<std::string>()->default_value("1"))
+        ("r,repeat", "Number of times to repeat the test", cxxopts::value<int>()->default_value("1"))
         ("b,block-size", "Block size for the copy", cxxopts::value<std::string>()->default_value("1MB"))
         ("c,chunk-size", "Chunk size for the copy", cxxopts::value<std::string>()->default_value("1MB"))
         ("n,non-blocking", "Use non-blocking copy", cxxopts::value<bool>()->default_value("false"))

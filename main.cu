@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iterator>
 #include <iostream>
+#include <thread>
 #include "include/cxxopts.hpp"
 #include <cuda_runtime.h>
 
@@ -253,38 +254,20 @@ auto load_validate_map() -> std::map<std::string, std::function<bool(void*, void
     return patterns;
 }
 
-auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
+
+auto memcpy_thread_fxn(int gpu_id, bool pinned, bool unified, bool zero_buffer, bool non_blocking, unsigned long long size, int repeat, unsigned long long duration, std::vector<std::string> patterns) -> void
 {
+    cudaSetDevice(gpu_id);
+
     // Load functions.
     auto pattern_map = load_pattern_map();
     auto validate_map = load_validate_map();
 
-    std::cout << "Running memcpy" << std::endl;
-    
-    auto gpu_ids = get_gpus(result);
-    std::string gpu_ids_str = "";
-    for (auto gpu_id : gpu_ids) {
-        gpu_ids_str += std::to_string(gpu_id) + ",";
-    }
-    std::cout << "  GPUs: " << gpu_ids_str << std::endl;
-    std::cout << "  Size: " << result["size"].as<std::string>() << std::endl;
-    std::cout << "  Duration: " << result["duration"].as<std::string>() << std::endl;
-    //std::cout << "  Pattern: " << vector_to_string(result["pattern"].as<std::vector<std::string>>()) << std::endl;
-    std::cout << "  Repeat: " << result["repeat"].as<int>() << std::endl;
-    std::cout << "  Block Size: " << result["block-size"].as<std::string>() << std::endl;
-    std::cout << "  Chunk Size: " << result["chunk-size"].as<std::string>() << std::endl;
-    std::cout << "  Non Blocking: " << result["non-blocking"].as<bool>() << std::endl;
-    std::cout << "  Zero Buffer: " << result["zero-buffer"].as<bool>() << std::endl;
-    std::cout << "  Use Pinned: " << result["use-pinned"].as<bool>() << std::endl;
-    std::cout << "  Use Unified: " << result["use-unified"].as<bool>() << std::endl;
-    
     std::cout << "Allocating Host Memory" << std::endl;
-    auto size = get_size(result);
     void* h_a;
     void* h_b;
 
-    bool pinned = result["use-pinned"].as<bool>();
-    if (result["use-pinned"].as<bool>())
+    if (pinned)
     {
         std::cout << "Allocating Pinned Memory" << std::endl;
         cudaMallocHost(&h_a, size);
@@ -299,7 +282,7 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
     std::cout << "Allocating Device Memory" << std::endl;
     void* d_a;
     void* d_b;
-    if (result["use-unified"].as<bool>())
+    if (unified)
     {
         std::cout << "Allocating Unified Memory" << std::endl;
         cudaMallocManaged(&d_a, size);
@@ -311,7 +294,7 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
         cudaMalloc(&d_b, size);
     }
 
-    if (result["zero-buffer"].as<bool>())
+    if (zero_buffer)
     {
         std::cout << "Zeroing Device Memory" << std::endl;
         cudaMemset(d_a, 0, size);
@@ -320,12 +303,10 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
         memset(h_b, 0, size);
     }
 
-    auto duration = get_duration(result);
-
-    for (int i = 0; i < result["repeat"].as<int>(); i++)
+    for (int i = 0; i < repeat; i++)
     {
-        std::cout << "Running Repeat: " << i << std::endl;
-        for (auto pattern : result["pattern"].as<std::vector<std::string>>())
+        std::cout << "Running Repeat: " << i << " on GPU " << gpu_id << std::endl;
+        for (auto pattern : patterns)
         {
             std::cout << "Running Pattern: " << pattern << std::endl;
             auto pattern_func = pattern_map[pattern];
@@ -334,7 +315,7 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
             auto start = time(NULL);
             while (time(NULL) - start < duration)
             {
-                if(result["zero-buffer"].as<bool>())
+                if(zero_buffer)
                 {
                     cudaMemset(d_a, 0, size);
                     cudaMemset(d_b, 0, size);
@@ -346,7 +327,7 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
                 cudaDeviceSynchronize();
                 if (!validate_func(h_a, h_b, size))
                 {
-                    std::cout << " [!] Found corruption" << std::endl;
+                    std::cout << " [!] Found corruption on GPU " << gpu_id << "" << std::endl;
                 }
             }
         }
@@ -358,6 +339,53 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
     cudaFree(d_b);
     cudaFreeHost(h_a);
     cudaFreeHost(h_b);
+}
+
+auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
+{
+    std::cout << "Running memcpy test" << std::endl;
+    
+    auto gpu_ids = get_gpus(result);
+    std::string gpu_ids_str = "";
+    for (auto gpu_id : gpu_ids) {
+        gpu_ids_str += std::to_string(gpu_id) + ",";
+    }
+    std::cout << "  GPUs: " << gpu_ids_str << std::endl;
+    std::cout << "  Size: " << result["size"].as<std::string>() << std::endl;
+    std::cout << "  Duration: " << result["duration"].as<std::string>() << std::endl;
+    std::cout << "  Threads per GPU: " << result["threads"].as<int>() << std::endl;
+    //std::cout << "  Pattern: " << vector_to_string(result["pattern"].as<std::vector<std::string>>()) << std::endl;
+    std::cout << "  Repeat: " << result["repeat"].as<int>() << std::endl;
+    std::cout << "  Block Size: " << result["block-size"].as<std::string>() << std::endl;
+    std::cout << "  Chunk Size: " << result["chunk-size"].as<std::string>() << std::endl;
+    std::cout << "  Non Blocking: " << result["non-blocking"].as<bool>() << std::endl;
+    std::cout << "  Zero Buffer: " << result["zero-buffer"].as<bool>() << std::endl;
+    std::cout << "  Use Pinned: " << result["use-pinned"].as<bool>() << std::endl;
+    std::cout << "  Use Unified: " << result["use-unified"].as<bool>() << std::endl;
+    
+    std::vector<std::thread> threads;
+
+    bool zero_buffer = result["zero-buffer"].as<bool>();
+    bool non_blocking = result["non-blocking"].as<bool>();
+    bool pinned = result["use-pinned"].as<bool>();
+    bool unified = result["use-unified"].as<bool>();
+    unsigned long long duration = get_duration(result);
+    int repeat = result["repeat"].as<int>();
+    std::vector<std::string> patterns = result["pattern"].as<std::vector<std::string>>();
+    unsigned long long size = get_size(result);
+
+
+    for (auto gpu_id : gpu_ids)
+    {
+        for (int i = 0; i < result["threads"].as<int>(); i++)
+        {
+            threads.push_back(std::thread(memcpy_thread_fxn, gpu_id, pinned, unified, zero_buffer, non_blocking, size, repeat, duration, patterns));
+        }
+    }
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
 
     return 0;
 }
@@ -395,6 +423,7 @@ auto main(int argc, char** argv) -> int
         ("v,version", "Print version")
         ("g,gpus", "List of GPUs to run the test on", cxxopts::value<std::vector<std::string>>()->default_value("all"))
         ("l,list-gpus", "List all available GPUs")
+        ("t,threads", "Number of Host threads to use per GPU", cxxopts::value<int>()->default_value("1"))
         ("s,size", "Size of the buffer to copy", cxxopts::value<std::string>()->default_value("1M"))
         ("d,duration", "Duration of the test", cxxopts::value<std::string>()->default_value("100s"))
         ("p,pattern", "Patterns to use for the copy", cxxopts::value<std::vector<std::string>>()->default_value("alternating"))

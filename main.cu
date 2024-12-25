@@ -232,7 +232,7 @@ bool validate_alternating(void* a, void* b, size_t size)
     char* a_ptr = (char*)a;
     char* b_ptr = (char*)b;
     for (size_t i = 0; i < size; i++) {
-        if (a_ptr[i] & b_ptr[i] != 0) {
+        if (a_ptr[i] != 0 && b_ptr[i]!= 0 && a_ptr[i] & b_ptr[i] != 0) {
             return false;
         }
     }
@@ -332,7 +332,7 @@ auto run_memcpy(cxxopts::ParseResult& result, auto& options) -> int
             auto validate_func = validate_map[pattern];
             pattern_func(h_a, h_b, size);
             auto start = time(NULL);
-            while (time(NULL) - start < start + duration)
+            while (time(NULL) - start < duration)
             {
                 if(result["zero-buffer"].as<bool>())
                 {
